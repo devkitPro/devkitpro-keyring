@@ -4,7 +4,7 @@ PREFIX = /usr/local
 
 install:
 	install -dm755 $(DESTDIR)$(PREFIX)/share/pacman/keyrings/
-	install -m0644 devkitpro{.gpg,-trusted,-revoked} $(DESTDIR)$(PREFIX)/share/pacman/keyrings/
+	install -m0644 devkitpro.gpg devkitpro-trusted devkitpro-revoked $(DESTDIR)$(PREFIX)/share/pacman/keyrings/
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/share/pacman/keyrings/devkitpro{.gpg,-trusted,-revoked}
