@@ -1,21 +1,36 @@
 #!/bin/bash
 
+set -e
+
 export LANG=C
 
 TMPDIR=$(mktemp -d)
 trap "rm -rf '${TMPDIR}'" EXIT
 
-KEYSERVER='hkp://pool.sks-keyservers.net'
-GPG="gpg --quiet --batch --no-tty --no-permission-warning --keyserver "${KEYSERVER}" --homedir ${TMPDIR}"
+KEYSERVER='keyserver.ubuntu.com'
+GPG=(gpg --homedir "${TMPDIR}")
 
-pushd "$(dirname "$0")" >/dev/null
+cat << __EOF__ > "${TMPDIR}"/gpg.conf
+quiet
+batch
+no-tty
+no-permission-warning
+export-options no-export-attributes,export-clean
+keyserver ${KEYSERVER}
+keyserver-options no-self-sigs-only
+armor
+no-emit-version
+allow-weak-key-signatures
+__EOF__
 
-$GPG --gen-key <<EOF
-%echo Generating MSYS2 Keyring keychain master key...
+cd "$(dirname "$0")"
+
+"${GPG[@]}" --gen-key <<EOF
+%echo Generating devkitPro keyring temporary master key...
 Key-Type: RSA
-Key-Length: 4096
+Key-Length: 2048
 Key-Usage: sign
-Name-Real: devkitPro Keyring Keychain Master Key
+Name-Real: devkitPro keyring temporary master key
 Name-Email: devkitPro-keyring@localhost
 Expire-Date: 0
 %no-protection
@@ -23,55 +38,61 @@ Expire-Date: 0
 %echo Done
 EOF
 
-rm -rf master packager packager-revoked devkitpro-trusted devkitpro-revoked
-mkdir master packager packager-revoked
+"${GPG[@]}" --import < devkitpro.gpg
 
+rm -rf master{,-revoked} packager{,-revoked} devkitpro-{trusted,revoked}
+mkdir master packager master-revoked packager-revoked
+
+# refresh/receive all keys
 while read -ra data; do
 	keyid="${data[0]}"
 	username="${data[@]:1}"
-	${GPG} --recv-keys ${keyid} &>/dev/null
-	printf 'minimize\nquit\ny\n' | \
-		${GPG} --command-fd 0 --edit-key ${keyid}
-	${GPG} --yes --lsign-key ${keyid} &>/dev/null
-	${GPG} --armor --no-emit-version --export ${keyid} >> master/${username}.asc
+	if "${GPG[@]}" --list-keys ${keyid} >/dev/null &>/dev/null; then
+		"${GPG[@]}" --refresh-keys ${keyid} &>/dev/null
+	else
+		"${GPG[@]}" --recv-keys ${keyid} &>/dev/null
+	fi
+done < <(cat master-keyids master-revoked-keyids packager-keyids packager-revoked-keyids)
+
+# master-keyids
+while read -ra data; do
+	keyid="${data[0]}"
+	username="${data[@]:1}"
+        # if the key has multiple uids, GPG wants to ask if we're sure about it
+        # but `--yes` doesn't answer it, so we do it manually
+        echo $'y\n' | "${GPG[@]}" --yes --command-fd 0 --no-batch --lsign-key ${keyid} &>/dev/null
+	"${GPG[@]}" --comment "master-key: ${username} (${keyid})" --export ${keyid} >> master/${username}.asc
 	echo "${keyid}:4:" >> devkitpro-trusted
 done < master-keyids
-${GPG} --import-ownertrust < devkitpro-trusted 2>/dev/null
+"${GPG[@]}" --import-ownertrust < devkitpro-trusted 2>/dev/null
 
-while read -ra data; do
-	keyid="${data[0]}"
-	printf "Receive ${keyid}"
-	${GPG} --recv-keys ${keyid} &>/dev/null
-done < packager-keyids
-while read -ra data; do
-	keyid="${data[0]}"
-	username="${data[@]:1}"
-	printf 'clean\nquit\ny\n' | \
-		${GPG} --command-fd 0 --edit-key ${keyid}
-	${GPG} --list-keys --with-colons ${keyid}
-	if ! ${GPG} --list-keys --with-colons ${keyid} 2>/dev/null | grep -q '^pub:f:'; then
-		echo "key is not fully trusted: ${keyid} ${username}"
-	else
-		${GPG} --armor --no-emit-version --export ${keyid} >> packager/${username}.asc
-	fi
-done < packager-keyids
-
+# master-revoked-keyids
 while read -ra data; do
 	keyid="${data[0]}"
 	username="${data[1]}"
-	${GPG} --recv-keys ${keyid} &>/dev/null
-	printf 'clean\nquit\ny\n' | \
-		${GPG} --command-fd 0 --edit-key ${keyid}
-	if ! ${GPG} --list-keys --with-colons ${keyid} 2>/dev/null | grep -q '^pub:f:'; then
-		${GPG} --armor --no-emit-version --export ${keyid} >> packager-revoked/${username}.asc
-		echo "${keyid}" >> devkitpro-revoked
+	"${GPG[@]}" --comment "revoked master-key: ${username} (${keyid})" --export ${keyid} >> master-revoked/${username}.asc
+	echo "${keyid}" >> devkitpro-revoked
+done < master-revoked-keyids
+
+# packager-keyids
+while read -ra data; do
+	keyid="${data[0]}"
+	username="${data[@]:1}"
+	if ! "${GPG[@]}" --list-keys --with-colons ${keyid} 2>/dev/null | grep -q '^pub:f:'; then
+		echo "WARNING: key is not fully trusted: ${keyid} ${username}"
+		"${GPG[@]}" --comment "marginal trust: ${username} (${keyid})" --export ${keyid} >> packager/${username}.asc
 	else
-		echo "key is still fully trusted: ${keyid} ${username}"
+		"${GPG[@]}" --comment "packager: ${username} (${keyid})" --export ${keyid} >> packager/${username}.asc
 	fi
+done < packager-keyids
+
+# packager-revoked-keyids
+while read -ra data; do
+	keyid="${data[0]}"
+	username="${data[1]}"
+	"${GPG[@]}" --comment "revoked packager: ${username} (${keyid})" --export ${keyid} >> packager-revoked/${username}.asc
+	echo "${keyid}" >> devkitpro-revoked
 done < packager-revoked-keyids
 
-touch devkitpro-trusted devkitpro-revoked
-
-cat master/*.asc packager/*.asc packager-revoked/*.asc > devkitpro.gpg
-
-popd >/dev/null
+shopt -s nullglob
+cat master/*.asc master-revoked/*.asc packager/*.asc packager-revoked/*.asc > devkitpro.gpg
